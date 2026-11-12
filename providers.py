@@ -1,8 +1,38 @@
 """Bốn provider cùng một interface. Không chứa agent loop."""
 import json
 import os
+import re
+import sys
+import threading
+import time
 import urllib.error
 import urllib.request
+from collections import deque
+from pathlib import Path
+
+
+def _load_dotenv(path=Path(__file__).resolve().with_name('.env')):
+    """Đọc .env cạnh file này (KEY=VALUE hoặc export KEY=VALUE).
+
+    Biến đã đặt trong shell được ưu tiên; dòng có giá trị rỗng bị bỏ qua.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        if sep and key and value:
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
 
 CONFIG = {
     'openai': ('OPENAI_API_KEY', 'https://api.openai.com/v1/chat/completions'),
@@ -12,16 +42,97 @@ CONFIG = {
 }
 
 
-def post_json(url, headers, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
+def _env_number(name, default):
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        # Do not print response bodies: they may contain account or request data.
-        raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
+        return float(os.getenv(name, '') or default)
+    except ValueError:
+        return float(default)
+
+
+def _log(message):
+    print(f'[provider] {message}', file=sys.stderr, flush=True)
+
+
+class _RateLimiter:
+    """Tối đa LLM_RPM request trong mỗi cửa sổ 60 giây, tính riêng từng model.
+
+    Dùng chung cho mọi Provider trong process (agent + judge, nhiều --workers) nên khóa bằng lock.
+    LLM_RPM <= 0 hoặc không đặt: không giới hạn.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sent = {}
+
+    def wait(self, key):
+        rpm = int(_env_number('LLM_RPM', 0))
+        if rpm <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                sent = self._sent.setdefault(key, deque())
+                while sent and now - sent[0] >= 60:
+                    sent.popleft()
+                if len(sent) < rpm:
+                    sent.append(now)
+                    return
+                delay = 60 - (now - sent[0]) + 0.5
+            _log(f'Giới hạn {rpm} request/phút cho {key}: chờ {delay:.0f}s')
+            time.sleep(delay)
+
+
+_LIMITER = _RateLimiter()
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _read_error_body(exc):
+    # Chỉ dùng để nhận diện loại lỗi; không in ra vì có thể chứa thông tin tài khoản/request.
+    try:
+        return exc.read(8192).decode('utf-8', 'replace')
+    except Exception:
+        return ''
+
+
+def _retry_delay(exc, body, attempt):
+    """Ưu tiên Retry-After (header), rồi retryDelay của Gemini, cuối cùng là backoff lũy thừa."""
+    delay = None
+    header = exc.headers.get('Retry-After') if exc.headers else None
+    if header:
+        try:
+            delay = float(header)
+        except ValueError:
+            delay = None
+    if delay is None:
+        match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
+        if match:
+            delay = float(match.group(1))
+    if delay is None:
+        delay = 10 * 2 ** attempt
+    return min(delay + 1, _env_number('LLM_MAX_WAIT', 90))
+
+
+def post_json(url, headers, payload):
+    data = json.dumps(payload).encode()
+    retries = int(_env_number('LLM_MAX_RETRIES', 4))
+    limit_key = payload.get('model', url)
+    for attempt in range(retries + 1):
+        _LIMITER.wait(limit_key)
+        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json', **headers})
+        try:
+            with urllib.request.urlopen(req, timeout=_env_number('LLM_TIMEOUT', 60)) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            body = _read_error_body(exc)
+            if exc.code == 429 and 'PerDay' in body:
+                raise RuntimeError('Provider trả HTTP 429: đã hết quota theo NGÀY của model này; '
+                                   'thử lại sẽ không giúp được. Đổi model/key hoặc chờ quota reset.') from exc
+            if exc.code not in RETRY_STATUS or attempt == retries:
+                raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
+            delay = _retry_delay(exc, body, attempt)
+            _log(f'HTTP {exc.code} từ provider, thử lại lần {attempt + 1}/{retries} sau {delay:.0f}s')
+            time.sleep(delay)
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
 
 
 class Provider:

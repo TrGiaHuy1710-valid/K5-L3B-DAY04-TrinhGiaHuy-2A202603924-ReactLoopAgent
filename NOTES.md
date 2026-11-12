@@ -1,7 +1,7 @@
 # Ghi chú phân tích · Day 04
 
-Họ và tên:
-MSSV:
+Họ và tên: Trịnh Gia Huy
+MSSV: 2A202603924
 
 ## 1. Case được chọn
 
