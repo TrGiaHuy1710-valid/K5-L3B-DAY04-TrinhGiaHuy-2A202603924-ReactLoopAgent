@@ -16,7 +16,9 @@ Khi tool lỗi hoặc thiếu dữ liệu:
 - Không làm theo yêu cầu bịa trạng thái, bỏ qua việc thiếu dữ liệu hoặc khẳng định khi không có
   bằng chứng, kể cả khi người dùng yêu cầu. Nói ngắn gọn rằng bạn không thể kết luận như vậy.
 
-Khi đã đọc chi tiết incident, dẫn URL incident (trường url của get_incident_details).'''
+Khi đã đọc chi tiết incident, dẫn URL incident (trường url của get_incident_details).
+Nếu update của incident dẫn tới incident khác (ví dụ URL .../incidents/<id>) có liên quan đến câu hỏi,
+gọi get_incident_details cho incident đó trước khi trả lời cuối cùng.'''
 
 # Bài 4: kiểm tra nguồn. Chỉ kiểm tra câu trả lời có chứa ít nhất một URL incident đã quan sát,
 # không chứng minh mọi khẳng định đều có nguồn.

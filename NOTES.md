@@ -40,23 +40,63 @@ Phân tích:
 - **Vì sao chọn thay đổi này**:
   - Nguyên nhân H7 là thiếu quy tắc ưu tiên trong prompt, không phải lỗi loop hay dữ liệu, nên sửa đúng chỗ là system prompt. Quy tắc viết theo **loại lỗi** (lỗi tool, yêu cầu bịa) chứ không theo case, không hard-code tên dịch vụ hay câu trả lời, để áp dụng được cho A3 (timeout một phía) và các yêu cầu bịa khác.
   - Kiểm tra nguồn là yêu cầu của đề; ở `eval_before`, 8/13 case đã đọc incident nhưng **không** dẫn URL incident (E2, E3, E4, E5, A6, A7, H1, H6) mà judge vẫn cho evidence 20/20, nên cần một kiểm tra bằng code không phụ thuộc judge. Giới hạn: chỉ kiểm tra *có* ít nhất một URL đã quan sát, không chứng minh mọi khẳng định đều có nguồn.
-- **Kiểm tra**: `python -m unittest discover -s tests -v` → 37/37 pass. Chạy thử từng case sau thay đổi (1 lần, chưa phải `eval_after`): H7 40 → **100**; E2 có URL incident trong câu trả lời; **H1 100 → 60** (tác dụng phụ, xem phụ lục CP5).
+  3. **Điều chỉnh bổ sung sau khi thấy tác dụng phụ ở H1** — `agent.py`, `SYSTEM_PROMPT`: thêm quy tắc chung *"Nếu update của incident dẫn tới incident khác (ví dụ URL .../incidents/<id>) có liên quan đến câu hỏi, gọi get_incident_details cho incident đó trước khi trả lời cuối cùng."* Khối prompt ở (1) làm model trả lời sớm, không còn đi theo liên kết trong incident (H1: 0/3 lần, so với 3/3 với prompt gốc). Đây là điều chỉnh thứ hai, chỉ để sửa lỗi do thay đổi (1) gây ra; chi tiết ở phụ lục CP5–CP6.
+- **Kiểm tra**: `python -m unittest discover -s tests -v` → 37/37 pass. Chạy thử từng case:
+  - Sau (1)+(2): H7 40 → **100**; E2 có URL incident; **H1 100 → 60** (tác dụng phụ).
+  - Sau (3): H1 **100** ở 3/3 lần (đọc `xr3myzj7ms51` ở step 2); H7 vẫn **100** ở 2/2 lần.
 
 ## 4. So sánh hai lần chạy
 
+Cấu hình hai lần chạy giống nhau (khối `config` trong hai file trùng khớp): `gemini` / `gemini-3.5-flash-lite`, judge `gemini` / `gemini-3.5-flash-lite`, `max_steps=8`, dataset `core`, snapshot 09/11/2026, `--workers 1`, `LLM_RPM=4`.
+
 | Chỉ số | `eval_before.json` | `eval_after.json` |
 |---|---|---|
-| Điểm tổng |  |  |
-| Điểm case đã chọn |  |  |
-| Số model calls |  |  |
-| Token, chi phí nếu có |  |  |
+| Điểm tổng | 95.0 (22/22 case được chấm) | **97.59** (22/22 case được chấm) |
+| Điểm case đã chọn (H7) | 40 (boundaries 0/15) | **100** (boundaries 15/15) |
+| Số model calls (agent) | 54 | 52 |
+| Token agent | 53.109 | 60.208 (+13%) |
+| Token judge | 42.654 | 40.870 |
+| Token tổng | 95.763 | 101.078 |
+| Chi phí | 0 (Gemini free tier) | 0 (Gemini free tier) |
+| Thời gian chạy | ~18 phút (00:16:29–00:34:47) | ~18 phút (01:43:46–02:01:59) |
+| HTTP 429 | 0 | 0 |
+| Case đọc incident có dẫn URL incident | 5/13 | **14/14** |
+| Event `validation_missing_source` | 0 (chưa có kiểm tra nguồn) | 0 |
 
-- Lỗi đã giải quyết:
-- Lỗi còn lại hoặc mới xuất hiện:
+Thay đổi điểm theo case (các case còn lại giữ 100):
+
+| Case | Trước | Sau | Ghi chú |
+|---|---:|---:|---|
+| H7 | 40 | **100** | Không còn kết luận Cloudflare `operational` khi timeout |
+| H1 | 100 | 97 | Vẫn đọc đủ 3 incident qua 2 step; completeness 22/25 vì *"chưa nêu rõ chi tiết dữ liệu có thể bị cắt"* |
+| H2 | 50 | 50 | Vẫn không gọi `get_status` (bị trần 50) |
+
+Token agent tăng 13% dù số model calls giảm 2: system prompt dài hơn được gửi lại ở **mọi** model call, và câu trả lời có thêm URL. Ví dụ E1 tăng 1.497 → 4.122 token vì lần này agent gọi thêm `get_incident_details` (2 → 3 model calls).
+
+- **Lỗi đã giải quyết**:
+  - **H7**: phần Cloudflare giờ là *"Việc kiểm tra trạng thái Cloudflare không thành công do lỗi timeout... lỗi kết nối từ tool **không** có nghĩa là dịch vụ đang hoạt động bình thường... tôi không thể kết luận trạng thái hiện tại của Cloudflare Spectrum vì thiếu dữ liệu"*. Trace giống hệt lần 1 (2 `get_status` ở step 1, Cloudflare `TimeoutError`), chỉ khác câu trả lời → xác nhận lỗi nằm ở prompt, không ở loop.
+  - **Thiếu URL incident**: 8 case trước đây thiếu (E2, E3, E4, E5, A6, A7, H1, H6) nay đều có URL incident; 14/14 case đọc incident có dẫn URL. Điểm judge của 8 case này không đổi (vẫn 100) vì judge đã cho evidence 20/20 từ lần 1.
+  - **Tác dụng phụ ở H1** (do khối prompt mới, phát hiện ở CP5) đã được khắc phục bằng điều chỉnh (3): H1 đọc `xr3myzj7ms51` ở step 2 trong `eval_after`.
+- **Lỗi còn lại hoặc mới xuất hiện**:
+  - **H2 không đổi (50)**: agent vẫn chỉ gọi `get_incident_details("github", "t89g2q1800fr")`, không gọi `get_status` để kiểm tra snapshot Actions. Câu trả lời đã rõ ràng hơn (*"tôi không thể xác nhận khẳng định rằng GitHub Actions đang bị outage"*; lần 1 mở đầu *"tôi xin xác nhận thông tin"*), nhưng thiếu bằng chứng tình trạng hiện tại. Thay đổi lần này không nhắm vào lỗi này. Hướng sửa: quy tắc *"trước khi kết luận về outage hiện tại, gọi get_status cho component liên quan"*.
+  - **H6** (mới thấy khi chạy thử, chưa thấy trong eval): 1 lần chạy thử sau điều chỉnh (3) được 50 vì bỏ qua `get_status` (cùng kiểu lỗi H2); trong `eval_after` H6 gọi đủ tool và được 100. Hành vi chưa ổn định.
+  - **H1 −3 điểm**: chưa nêu rõ dữ liệu update có thể bị cắt (tool chỉ trả 3 trong `updates_total` update).
+  - `validation_missing_source` **không kích hoạt lần nào** trong `eval_after`: việc dẫn URL tăng lên là nhờ dòng prompt, kiểm tra nguồn chỉ đóng vai trò lưới an toàn và mới được chứng minh bằng unit test.
 
 ## 5. Giới hạn
 
-Nêu giới hạn của điểm judge, của snapshot và của việc chỉ chạy một lần mỗi phiên bản.
+- **Điểm judge**:
+  - Judge dùng **cùng model** với agent (`gemini-3.5-flash-lite`), có thể dễ dãi với kiểu trả lời của chính nó. Ở lần 1, 20/22 case được đúng 100 với 40/25/20/15 tuyệt đối, kể cả 8 case không dẫn URL incident vẫn được evidence 20/20, nên điểm 95 nhiều khả năng cao hơn chất lượng thực.
+  - Điểm judge không phản ánh cải thiện về nguồn: tỉ lệ dẫn URL incident tăng 5/13 → 14/14 nhưng điểm 8 case đó không đổi. Mức tăng 95 → 97.59 gần như hoàn toàn đến từ H7.
+  - Điểm cuối bị chi phối bởi kiểm tra bằng code: H2 được judge chấm 85 nhưng bị trần 50 vì thiếu `get_status`. Kiểm tra này chỉ xét *có gọi tool* hay không, không xét nội dung.
+  - Judge cũng có thể sai theo hướng ngược lại: H1 bị trừ 3 điểm vì chưa nói dữ liệu có thể bị cắt, một tiêu chí nhỏ.
+- **Snapshot**:
+  - Dữ liệu cố định ngày 09/11/2026, chỉ 50 incident gần nhất mỗi provider, mỗi incident chỉ trả 3 update (tối đa 900 ký tự); không phản ánh trạng thái hiện tại.
+  - Các tình huống timeout (H7, A3), injection (H5) và dữ liệu nhiễu (H6) là **giả lập**; kết quả tốt trên snapshot không chứng minh agent xử lý đúng với API live (rate limit thật, dữ liệu thay đổi, lỗi định dạng khác).
+- **Chỉ chạy một lần mỗi phiên bản**:
+  - Hành vi model dao động giữa các lần chạy: H1 với prompt sau thay đổi (1) được 60 ở 3/3 lần, nhưng khi bỏ một dòng prompt thì lúc 100 lúc 60; H6 được 50 ở một lần chạy thử nhưng 100 trong `eval_after`.
+  - Chênh lệch 2,59 điểm ở mức tổng tương đương một case thay đổi, nằm trong mức dao động có thể có giữa hai lần chạy; muốn kết luận chắc cần chạy mỗi phiên bản nhiều lần (ví dụ 3–5 lần) và so sánh trung bình, độ lệch.
+  - Kết quả chỉ đúng cho `gemini-3.5-flash-lite` và bộ 22 case này; prompt có thể tác động khác với model khác.
 
 ---
 
@@ -261,9 +301,36 @@ Chạy lặp H1 để tách nguyên nhân (thay prompt trong bộ nhớ, không 
 
 Kết luận: khối prompt mới làm model **trả lời sớm hơn**, không còn đi tiếp theo liên kết; không quy được cho một dòng duy nhất (mẫu nhỏ, kết quả dao động). Phần kiểm tra nguồn không liên quan (không kích hoạt trong các lần chạy H1). Đây là ví dụ thay đổi prompt sửa một case nhưng làm hỏng case khác.
 
+### CP6 · Bài 5: eval lần 2
+
+**Quyết định trước khi chạy**: xử lý tác dụng phụ ở H1 bằng một quy tắc chung (phương án 2), không giữ nguyên.
+
+**Đã làm**
+1. Thêm vào `SYSTEM_PROMPT`: *"Nếu update của incident dẫn tới incident khác (ví dụ URL .../incidents/<id>) có liên quan đến câu hỏi, gọi get_incident_details cho incident đó trước khi trả lời cuối cùng."* Unit test vẫn 37/37.
+2. Chạy thử trước khi chạy cả bộ:
+
+   ```text
+   H1 run1: score=100 tools=[(1, h02n9572mx9y), (1, yaa0witbl2me), (2, xr3myzj7ms51)]
+   H1 run2: score=100 tools=[(1, h02n9572mx9y), (1, yaa0witbl2me), (2, xr3myzj7ms51)]
+   H1 run3: score=100 tools=[(1, h02n9572mx9y), (1, yaa0witbl2me), (2, xr3myzj7ms51)]
+   H7 run1: score=100 tools=[(1, github), (1, cloudflare)]
+   H7 run2: score=100 tools=[(1, github), (1, cloudflare)]
+   H6 run1: score=50  viol=[Chưa gọi tool cần thiết: get_status] tools=[(1, h02n9572mx9y), (2, xr3myzj7ms51)]
+   ```
+
+3. Kiểm tra `.env` trước khi chạy: provider, model, judge và `LLM_RPM` giống CP4.
+4. Chạy `python evals/run_evals.py --output eval_after.json`: 01:43:46–02:01:59, **97.59/100**, 22/22 case được chấm, không gặp 429. Khối `config` trùng khớp với `eval_before.json`. Đã kiểm tra file không chứa key.
+5. So sánh chi tiết ở mục 4, giới hạn ở mục 5.
+
+**Kết quả chính**
+- 95.0 → **97.59**; H7 40 → **100**; H1 100 → 97 (vẫn đi đúng theo liên kết); H2 giữ 50; 19 case còn lại giữ 100.
+- Dẫn URL incident: 5/13 → **14/14** case; `validation_missing_source` không kích hoạt lần nào.
+- Model calls 54 → 52; token agent +13% (system prompt dài hơn).
+
 ### Kế hoạch tiếp theo
 
-- **Trước CP6, cần quyết định** có xử lý tác dụng phụ ở H1 hay không:
-  - Giữ nguyên và báo cáo H1 là lỗi mới xuất hiện ở mục 4 (đúng tinh thần "một thay đổi").
-  - Hoặc thêm quy tắc chung *"nếu update của incident dẫn tới incident khác liên quan đến câu hỏi, đọc incident đó trước khi trả lời"*, chạy lại H1 và H7 để kiểm tra, rồi ghi rõ đây là điều chỉnh thứ hai.
-- **CP6**: chạy `eval_after.json` cùng cấu hình (gemini / gemini-3.5-flash-lite, judge cùng model, `max_steps=8`, dataset core), điền mục 4–5. Cần so sánh cả H1, H2, A3 (timeout một phía) và số lần `validation_missing_source`.
+- **CP7** (demo, chốt bài và nộp):
+  - Demo một trace nhiều bước: H1 trong `eval_after.json` (3 incident qua 2 step, đi theo liên kết `xr3myzj7ms51`, có URL từng bên).
+  - Demo một lỗi agent: H7 trước/sau (cùng trace, khác câu trả lời) và tác dụng phụ H1 ở CP5.
+  - Đi hết checklist trong `SUBMISSION.md`: unit test, `config` hai file eval giống nhau, NOTES đủ 5 mục, không có `.env`/key trong repo, repo public, nộp link LMS.
+- **Có thể làm thêm** (không bắt buộc): sửa H2 bằng quy tắc gọi `get_status` trước khi kết luận outage; chạy mỗi phiên bản nhiều lần để đo độ dao động; bonus (+15).
